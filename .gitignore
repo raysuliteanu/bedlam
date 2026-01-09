@@ -1,2 +1,4 @@
 lib/maelstrom.jar
 store/
+target/
+.idea/

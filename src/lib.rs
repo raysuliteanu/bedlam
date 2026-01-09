@@ -24,25 +24,35 @@ pub mod messages {
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
-    #[serde(rename_all = "snake_case", tag = "type")]
-    pub enum Payload {
-        Init(Init),
-        InitOk,
-        Echo(Echo),
-        EchoOk(Echo),
-    }
-
-    #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct Init {
         pub node_id: String,
         // node_ids includes node_id
         pub node_ids: Vec<String>,
     }
 
+    // The code is an integer which indicates the type of error which occurred.
+    // Maelstrom defines several error types, and you can also invent your own.
+    // Codes 0-999 are reserved for Maelstrom's use; codes 1000 and above are
+    // free for your own purposes.
+    // The text field is a free-form string. It is optional, and may contain any
+    // explanatory message you like. You may include other keys in the error body,
+    // if you like; Maelstrom will retain them as a part of the history, and they
+    // may be helpful in your own analysis.
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct Error {
         code: u32,
         text: Option<String>,
+    }
+
+    #[derive(Debug, Clone, Serialize, Deserialize)]
+    #[serde(rename_all = "snake_case", tag = "type")]
+    pub enum Payload {
+        Init(Init),
+        InitOk,
+        Echo(Echo),
+        EchoOk(Echo),
+        Generate,
+        GenerateOk { id: String },
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,33 +132,47 @@ impl<'a> Node<UninitializedNode<'a>> {
 }
 
 impl<'a> Node<IntializedNode<'a>> {
-    pub fn process_messages(mut self) -> anyhow::Result<()> {
-        for input in self.state.input_stream {
+    fn send_resp(&mut self, src: &Mesg, payload: Payload) -> anyhow::Result<()> {
+        let mesg = Mesg {
+            src: self.state.node_id.clone(),
+            dst: src.src.clone(),
+            body: Body {
+                msg_id: Some(self.state.guid),
+                in_reply_to: src.body.msg_id,
+                payload,
+            },
+        };
+
+        self.state.guid += 1;
+
+        writeln!(
+            &mut self.state.output,
+            "{}",
+            serde_json::to_string(&mesg).context("serialize init_ok response")?
+        )
+        .context("serialize response failed")
+    }
+
+    pub fn process_messages(&mut self) -> anyhow::Result<()> {
+        while let Some(input) = self.state.input_stream.next() {
             let mesg: Mesg = input.context("message deserialization failed")?;
-            match mesg.body.payload {
+            if let Some(payload) = match mesg.body.payload {
                 Payload::Init(_) => todo!("should not get an init"),
                 Payload::InitOk => todo!("should not get an init_ok"),
-                Payload::Echo(echo) => {
-                    let echo_ok = Mesg {
-                        src: self.state.node_id.clone(),
-                        dst: mesg.src,
-                        body: Body {
-                            msg_id: Some(self.state.guid),
-                            in_reply_to: mesg.body.msg_id,
-                            payload: Payload::EchoOk(Echo { echo: echo.echo }),
-                        },
-                    };
-
-                    self.state.guid += 1;
-
-                    writeln!(
-                        &mut self.state.output,
-                        "{}",
-                        serde_json::to_string(&echo_ok).context("serialize init_ok response")?
-                    )?;
+                Payload::Echo(ref echo) => Some(Payload::EchoOk(Echo {
+                    echo: echo.echo.clone(),
+                })),
+                Payload::EchoOk(_) => None,
+                Payload::Generate => {
+                    let id = format!("{}-{}", self.state.node_id, self.state.guid);
+                    Some(Payload::GenerateOk { id })
                 }
-                Payload::EchoOk(_) => {}
-            }
+                Payload::GenerateOk { .. } => None,
+            } {
+                self.send_resp(&mesg, payload)?;
+            } else {
+                eprintln!("ignoring message: {mesg:?}");
+            };
         }
         Ok(())
     }
