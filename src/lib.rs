@@ -156,23 +156,24 @@ impl<'a> Node<IntializedNode<'a>> {
     pub fn process_messages(&mut self) -> anyhow::Result<()> {
         while let Some(input) = self.state.input_stream.next() {
             let mesg: Mesg = input.context("message deserialization failed")?;
-            if let Some(payload) = match mesg.body.payload {
+            match mesg.body.payload {
                 Payload::Init(_) => todo!("should not get an init"),
                 Payload::InitOk => todo!("should not get an init_ok"),
-                Payload::Echo(ref echo) => Some(Payload::EchoOk(Echo {
-                    echo: echo.echo.clone(),
-                })),
-                Payload::EchoOk(_) => None,
+                Payload::Echo(ref echo) => {
+                    self.send_resp(
+                        &mesg,
+                        Payload::EchoOk(Echo {
+                            echo: echo.echo.clone(),
+                        }),
+                    )?;
+                }
+                Payload::EchoOk(_) => {}
                 Payload::Generate => {
                     let id = format!("{}-{}", self.state.node_id, self.state.guid);
-                    Some(Payload::GenerateOk { id })
+                    self.send_resp(&mesg, Payload::GenerateOk { id })?;
                 }
-                Payload::GenerateOk { .. } => None,
-            } {
-                self.send_resp(&mesg, payload)?;
-            } else {
-                eprintln!("ignoring message: {mesg:?}");
-            };
+                Payload::GenerateOk { .. } => {}
+            }
         }
         Ok(())
     }
