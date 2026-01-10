@@ -1,3 +1,4 @@
+use ::log::{debug, info};
 use anyhow::Context;
 use serde_json::{StreamDeserializer, de::IoRead};
 use std::{
@@ -6,6 +7,8 @@ use std::{
 };
 
 use crate::messages::{Body, Echo, Mesg, Payload};
+
+pub mod log;
 
 pub mod messages {
     use std::collections::HashMap;
@@ -20,12 +23,42 @@ pub mod messages {
         pub body: Body,
     }
 
+    impl std::fmt::Display for Mesg {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            write!(
+                f,
+                "src: {}, dest: {}, body: {}",
+                self.src, self.dst, self.body
+            )
+        }
+    }
+
     #[derive(Debug, Clone, Serialize, Deserialize)]
     pub struct Body {
         pub msg_id: Option<usize>,
         pub in_reply_to: Option<usize>,
         #[serde(flatten)]
         pub payload: Payload,
+    }
+
+    impl std::fmt::Display for Body {
+        fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+            let msg_id = if let Some(msg_id) = self.msg_id {
+                &usize::to_string(&msg_id)
+            } else {
+                "none"
+            };
+            let in_reply_to = if let Some(in_reply_to) = self.in_reply_to {
+                &usize::to_string(&in_reply_to)
+            } else {
+                "none"
+            };
+            write!(
+                f,
+                "msg_id: {msg_id}, in_reply_to: {in_reply_to}, payload: {:?}",
+                self.payload
+            )
+        }
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -91,13 +124,52 @@ pub struct IntializedNode<'de> {
     pub cluster: HashSet<String>,
     pub topology: HashMap<String, Vec<String>>,
     pub msg_id: usize,
+    broadcast_ids: Vec<i32>,
     input_stream: StreamDeserializer<'de, IoRead<StdinLock<'de>>, Mesg>,
     output: StdoutLock<'de>,
-    broadcast_ids: Vec<i32>,
+}
+
+impl std::fmt::Display for IntializedNode<'_> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let cluster = self
+            .cluster
+            .iter()
+            .cloned()
+            .collect::<Vec<String>>()
+            .join(",");
+
+        let topology = self
+            .topology
+            .values()
+            .flatten()
+            .cloned()
+            .collect::<Vec<String>>()
+            .join(",");
+
+        let broadcast_ids = self
+            .broadcast_ids
+            .iter()
+            .take(10)
+            .map(|v| (*v).to_string())
+            .collect::<Vec<String>>()
+            .join(",");
+
+        write!(
+            f,
+            "node_id: {}, cluster: {}, topology: {}, msg_id: {}, broadcast_ids: [{}...]",
+            self.node_id, cluster, topology, self.msg_id, broadcast_ids,
+        )
+    }
 }
 
 pub struct Node<S> {
     state: S,
+}
+
+impl<S: std::fmt::Display> std::fmt::Display for Node<S> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.state)
+    }
 }
 
 impl<'a> Node<UninitializedNode<'a>> {
@@ -113,26 +185,19 @@ impl<'a> Node<UninitializedNode<'a>> {
         let mesg = input_stream.next().expect("expected an 'init' message")?;
         let init = match mesg.body.payload {
             Payload::Init(node) => {
-                let init_ok = Mesg {
-                    src: node.node_id.clone(),
-                    dst: mesg.src,
-                    body: Body {
-                        msg_id: Some(0),
-                        in_reply_to: mesg.body.msg_id,
-                        payload: Payload::InitOk,
-                    },
-                };
-
-                writeln!(
+                send_to(
                     &mut self.state.output,
-                    "{}",
-                    serde_json::to_string(&init_ok).context("serialize init_ok response")?
+                    &node.node_id,
+                    &mesg.src,
+                    0,
+                    mesg.body.msg_id,
+                    &Payload::InitOk,
                 )?;
 
                 node
             }
             _ => {
-                panic!("expected init message, got {:?}", mesg);
+                panic!("expected init message, got {mesg}");
             }
         };
 
@@ -143,7 +208,7 @@ impl<'a> Node<UninitializedNode<'a>> {
         let mut topology: HashMap<String, Vec<String>> = HashMap::new();
         topology.insert(init.node_id.clone(), cluster.iter().cloned().collect());
 
-        Ok(Node {
+        let node = Node {
             state: IntializedNode {
                 node_id: init.node_id,
                 cluster,
@@ -153,7 +218,11 @@ impl<'a> Node<UninitializedNode<'a>> {
                 output: self.state.output,
                 broadcast_ids: Vec::new(),
             },
-        })
+        };
+
+        info!("initialized node: {node}");
+
+        Ok(node)
     }
 }
 
@@ -166,7 +235,7 @@ impl<'a> Node<IntializedNode<'a>> {
             .expect("should always have some topo since initialized at init")
             .clone();
 
-        eprintln!("dests: {dests:?}");
+        debug!("broadcasting to dests: {dests:?}");
         dests
             .iter()
             .try_for_each(|dest| self.send(dest, None, payload))?;
@@ -180,29 +249,24 @@ impl<'a> Node<IntializedNode<'a>> {
         in_reply_to_id: Option<usize>,
         payload: &Payload,
     ) -> anyhow::Result<()> {
-        let mesg = Mesg {
-            src: self.state.node_id.clone(),
-            dst: dst.to_string(),
-            body: Body {
-                msg_id: Some(self.state.msg_id),
-                in_reply_to: in_reply_to_id,
-                payload: payload.clone(),
-            },
-        };
+        send_to(
+            &mut self.state.output,
+            &self.state.node_id,
+            dst,
+            self.state.msg_id,
+            in_reply_to_id,
+            payload,
+        )?;
 
         self.state.msg_id += 1;
 
-        writeln!(
-            &mut self.state.output,
-            "{}",
-            serde_json::to_string(&mesg).context("serialize response")?
-        )
-        .context("serialize response failed")
+        Ok(())
     }
 
     pub fn process_messages(&mut self) -> anyhow::Result<()> {
         while let Some(input) = self.state.input_stream.next() {
             let mesg: Mesg = input.context("message deserialization failed")?;
+            debug!("processing mesg: {mesg}");
             match mesg.body.payload {
                 Payload::Init(_) => todo!("should not get an init"),
                 Payload::InitOk => todo!("should not get an init_ok"),
@@ -246,4 +310,32 @@ impl<'a> Node<IntializedNode<'a>> {
         }
         Ok(())
     }
+}
+
+fn send_to(
+    write: &mut impl Write,
+    src: &str,
+    dst: &str,
+    msg_id: usize,
+    in_reply_to_id: Option<usize>,
+    payload: &Payload,
+) -> anyhow::Result<()> {
+    let mesg = Mesg {
+        src: src.to_string(),
+        dst: dst.to_string(),
+        body: Body {
+            msg_id: Some(msg_id),
+            in_reply_to: in_reply_to_id,
+            payload: payload.clone(),
+        },
+    };
+
+    debug!("sending: {mesg}");
+
+    writeln!(
+        write,
+        "{}",
+        serde_json::to_string(&mesg).context("serialize response")?
+    )
+    .context("serialize response failed")
 }
