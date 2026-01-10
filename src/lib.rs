@@ -161,11 +161,27 @@ impl<'a> Node<UninitializedNode<'a>> {
 }
 
 impl<'a> Node<IntializedNode<'a>> {
+    fn broadcast(&mut self, payload: &Payload) -> anyhow::Result<()> {
+        let dests = &self
+            .state
+            .topology
+            .get(&self.state.node_id)
+            .expect("should always have some topo since initialized at init")
+            .clone();
+
+        eprintln!("dests: {dests:?}");
+        dests
+            .iter()
+            .try_for_each(|dest| self.send(dest, None, payload))?;
+
+        Ok(())
+    }
+
     fn send(
         &mut self,
         dst: &str,
         in_reply_to_id: Option<usize>,
-        payload: Payload,
+        payload: &Payload,
     ) -> anyhow::Result<()> {
         let mesg = Mesg {
             src: self.state.node_id.clone(),
@@ -173,7 +189,7 @@ impl<'a> Node<IntializedNode<'a>> {
             body: Body {
                 msg_id: Some(self.state.msg_id),
                 in_reply_to: in_reply_to_id,
-                payload,
+                payload: payload.clone(),
             },
         };
 
@@ -182,7 +198,7 @@ impl<'a> Node<IntializedNode<'a>> {
         writeln!(
             &mut self.state.output,
             "{}",
-            serde_json::to_string(&mesg).context("serialize init_ok response")?
+            serde_json::to_string(&mesg).context("serialize response")?
         )
         .context("serialize response failed")
     }
@@ -197,7 +213,7 @@ impl<'a> Node<IntializedNode<'a>> {
                     self.send(
                         &mesg.src,
                         mesg.body.msg_id,
-                        Payload::EchoOk(Echo {
+                        &Payload::EchoOk(Echo {
                             echo: echo.echo.clone(),
                         }),
                     )?;
@@ -205,37 +221,28 @@ impl<'a> Node<IntializedNode<'a>> {
                 Payload::EchoOk(_) => {}
                 Payload::Generate => {
                     let id = format!("{}-{}", self.state.node_id, self.state.msg_id);
-                    self.send(&mesg.src, mesg.body.msg_id, Payload::GenerateOk { id })?;
+                    self.send(&mesg.src, mesg.body.msg_id, &Payload::GenerateOk { id })?;
                 }
                 Payload::GenerateOk { .. } => {}
                 Payload::Broadcast { message } => {
                     self.state.broadcast_ids.push(message);
-                    self.send(&mesg.src, mesg.body.msg_id, Payload::BroadcastOk)?;
+                    self.broadcast(&Payload::Broadcast { message })?;
+                    self.send(&mesg.src, mesg.body.msg_id, &Payload::BroadcastOk)?;
                 }
                 Payload::BroadcastOk => {}
                 Payload::Read => {
                     self.send(
                         &mesg.src,
                         mesg.body.msg_id,
-                        Payload::ReadOk {
+                        &Payload::ReadOk {
                             messages: self.state.broadcast_ids.clone(),
                         },
                     )?;
                 }
                 Payload::ReadOk { .. } => {}
-                /*
-                {
-                  "type": "topology",
-                  "topology": {
-                    "n1": ["n2", "n3"],
-                    "n2": ["n1"],
-                    "n3": ["n1"]
-                  }
-                }
-                */
                 Payload::Topology { topology } => {
                     self.state.topology = topology;
-                    self.send(&mesg.src, mesg.body.msg_id, Payload::TopologyOk)?;
+                    self.send(&mesg.src, mesg.body.msg_id, &Payload::TopologyOk)?;
                 }
                 Payload::TopologyOk => {}
             }
