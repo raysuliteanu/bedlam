@@ -1,6 +1,8 @@
 use bedlam::Node;
 
 fn main() -> anyhow::Result<()> {
+    bedlam::log::init()?;
+
     let stdin = std::io::stdin().lock();
     let stdout = std::io::stdout().lock();
 
