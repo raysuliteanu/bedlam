@@ -148,13 +148,18 @@ impl<'a> Node<UninitializedNode<'a>> {
 }
 
 impl<'a> Node<IntializedNode<'a>> {
-    fn send_resp(&mut self, src: &Mesg, payload: Payload) -> anyhow::Result<()> {
+    fn send(
+        &mut self,
+        dst: &str,
+        in_reply_to_id: Option<usize>,
+        payload: Payload,
+    ) -> anyhow::Result<()> {
         let mesg = Mesg {
             src: self.state.node_id.clone(),
-            dst: src.src.clone(),
+            dst: dst.to_string(),
             body: Body {
                 msg_id: Some(self.state.msg_id),
-                in_reply_to: src.body.msg_id,
+                in_reply_to: in_reply_to_id,
                 payload,
             },
         };
@@ -176,8 +181,9 @@ impl<'a> Node<IntializedNode<'a>> {
                 Payload::Init(_) => todo!("should not get an init"),
                 Payload::InitOk => todo!("should not get an init_ok"),
                 Payload::Echo(ref echo) => {
-                    self.send_resp(
-                        &mesg,
+                    self.send(
+                        &mesg.src,
+                        mesg.body.msg_id,
                         Payload::EchoOk(Echo {
                             echo: echo.echo.clone(),
                         }),
@@ -186,17 +192,18 @@ impl<'a> Node<IntializedNode<'a>> {
                 Payload::EchoOk(_) => {}
                 Payload::Generate => {
                     let id = format!("{}-{}", self.state.node_id, self.state.msg_id);
-                    self.send_resp(&mesg, Payload::GenerateOk { id })?;
+                    self.send(&mesg.src, mesg.body.msg_id, Payload::GenerateOk { id })?;
                 }
                 Payload::GenerateOk { .. } => {}
                 Payload::Broadcast { message } => {
                     self.state.broadcast_ids.push(message);
-                    self.send_resp(&mesg, Payload::BroadcastOk)?;
+                    self.send(&mesg.src, mesg.body.msg_id, Payload::BroadcastOk)?;
                 }
                 Payload::BroadcastOk => {}
                 Payload::Read => {
-                    self.send_resp(
-                        &mesg,
+                    self.send(
+                        &mesg.src,
+                        mesg.body.msg_id,
                         Payload::ReadOk {
                             messages: self.state.broadcast_ids.clone(),
                         },
@@ -204,7 +211,7 @@ impl<'a> Node<IntializedNode<'a>> {
                 }
                 Payload::ReadOk { .. } => {}
                 Payload::Topology { topology } => {
-                    self.send_resp(&mesg, Payload::TopologyOk)?;
+                    self.send(&mesg.src, mesg.body.msg_id, Payload::TopologyOk)?;
                 }
                 Payload::TopologyOk => {}
             }
