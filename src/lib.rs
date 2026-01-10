@@ -1,7 +1,7 @@
 use anyhow::Context;
 use serde_json::{StreamDeserializer, de::IoRead};
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     io::{StdinLock, StdoutLock, Write},
 };
 
@@ -57,12 +57,20 @@ pub mod messages {
         Echo(Echo),
         EchoOk(Echo),
         Generate,
-        GenerateOk { id: String },
-        Broadcast { message: i32 },
+        GenerateOk {
+            id: String,
+        },
+        Broadcast {
+            message: i32,
+        },
         BroadcastOk,
         Read,
-        ReadOk { messages: Vec<i32> },
-        Topology { topology: HashMap<String, Vec<i32>> },
+        ReadOk {
+            messages: Vec<i32>,
+        },
+        Topology {
+            topology: HashMap<String, Vec<String>>,
+        },
         TopologyOk,
     }
 
@@ -81,6 +89,7 @@ pub struct IntializedNode<'de> {
     pub node_id: String,
     // node_ids includes node_id
     pub cluster: HashSet<String>,
+    pub topology: HashMap<String, Vec<String>>,
     pub msg_id: usize,
     input_stream: StreamDeserializer<'de, IoRead<StdinLock<'de>>, Mesg>,
     output: StdoutLock<'de>,
@@ -134,10 +143,14 @@ impl<'a> Node<UninitializedNode<'a>> {
         cluster.retain(|id| *id != init.node_id);
         assert!(!cluster.contains(&init.node_id));
 
+        let mut topology: HashMap<String, Vec<String>> = HashMap::new();
+        topology.insert(init.node_id.clone(), cluster.iter().cloned().collect());
+
         Ok(Node {
             state: IntializedNode {
                 node_id: init.node_id,
                 cluster,
+                topology,
                 msg_id: 1,
                 input_stream,
                 output: self.state.output,
@@ -210,7 +223,18 @@ impl<'a> Node<IntializedNode<'a>> {
                     )?;
                 }
                 Payload::ReadOk { .. } => {}
+                /*
+                {
+                  "type": "topology",
+                  "topology": {
+                    "n1": ["n2", "n3"],
+                    "n2": ["n1"],
+                    "n3": ["n1"]
+                  }
+                }
+                */
                 Payload::Topology { topology } => {
+                    self.state.topology = topology;
                     self.send(&mesg.src, mesg.body.msg_id, Payload::TopologyOk)?;
                 }
                 Payload::TopologyOk => {}
