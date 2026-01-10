@@ -1,6 +1,9 @@
 use anyhow::Context;
 use serde_json::{StreamDeserializer, de::IoRead};
-use std::io::{StdinLock, StdoutLock, Write};
+use std::{
+    collections::HashSet,
+    io::{StdinLock, StdoutLock, Write},
+};
 
 use crate::messages::{Body, Echo, Mesg, Payload};
 
@@ -77,7 +80,7 @@ pub struct UninitializedNode<'a> {
 pub struct IntializedNode<'de> {
     pub node_id: String,
     // node_ids includes node_id
-    pub node_ids: Vec<String>,
+    pub cluster: HashSet<String>,
     pub msg_id: usize,
     input_stream: StreamDeserializer<'de, IoRead<StdinLock<'de>>, Mesg>,
     output: StdoutLock<'de>,
@@ -127,10 +130,14 @@ impl<'a> Node<UninitializedNode<'a>> {
             panic!("expected an init message")
         };
 
+        let mut cluster: HashSet<String> = HashSet::from_iter(init.node_ids);
+        cluster.retain(|id| *id != init.node_id);
+        assert!(!cluster.contains(&init.node_id));
+
         Ok(Node {
             state: IntializedNode {
                 node_id: init.node_id,
-                node_ids: init.node_ids,
+                cluster,
                 msg_id: 1,
                 input_stream,
                 output: self.state.output,
@@ -196,7 +203,7 @@ impl<'a> Node<IntializedNode<'a>> {
                     )?;
                 }
                 Payload::ReadOk { .. } => {}
-                Payload::Topology { .. } => {
+                Payload::Topology { topology } => {
                     self.send_resp(&mesg, Payload::TopologyOk)?;
                 }
                 Payload::TopologyOk => {}
