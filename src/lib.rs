@@ -124,7 +124,7 @@ pub struct IntializedNode<'de> {
     pub cluster: HashSet<String>,
     pub topology: HashMap<String, Vec<String>>,
     pub msg_id: usize,
-    broadcast_ids: Vec<i32>,
+    broadcast_ids: HashSet<i32>,
     input_stream: StreamDeserializer<'de, IoRead<StdinLock<'de>>, Mesg>,
     output: StdoutLock<'de>,
 }
@@ -216,7 +216,7 @@ impl<'a> Node<UninitializedNode<'a>> {
                 msg_id: 1,
                 input_stream,
                 output: self.state.output,
-                broadcast_ids: Vec::new(),
+                broadcast_ids: HashSet::new(),
             },
         };
 
@@ -227,18 +227,24 @@ impl<'a> Node<UninitializedNode<'a>> {
 }
 
 impl<'a> Node<IntializedNode<'a>> {
-    fn broadcast(&mut self, payload: &Payload) -> anyhow::Result<()> {
-        let dests = &self
+    fn broadcast(&mut self, src: &str, payload: &Payload) -> anyhow::Result<()> {
+        // broadcast to other nodes based on the current node's topology;
+        // HOWEVER, do not send a message to the node that sent this node the message
+        // in the first place if that node is in our topology, since it obviously
+        // already got the message given it's the one that sent it to this node
+        let dests = self
             .state
             .topology
             .get(&self.state.node_id)
             .expect("should always have some topo since initialized at init")
-            .clone();
-
-        debug!("broadcasting to dests: {dests:?}");
-        dests
             .iter()
-            .try_for_each(|dest| self.send(dest, None, payload))?;
+            .filter(|n| *n != src)
+            .cloned()
+            .collect::<Vec<String>>();
+
+        dests
+            .into_iter()
+            .try_for_each(|dest| self.send(&dest, None, payload))?;
 
         Ok(())
     }
@@ -286,8 +292,8 @@ impl<'a> Node<IntializedNode<'a>> {
                 }
                 Payload::GenerateOk { .. } => {}
                 Payload::Broadcast { message } => {
-                    self.state.broadcast_ids.push(message);
-                    self.broadcast(&Payload::Broadcast { message })?;
+                    self.state.broadcast_ids.insert(message);
+                    self.broadcast(&mesg.src, &Payload::Broadcast { message })?;
                     self.send(&mesg.src, mesg.body.msg_id, &Payload::BroadcastOk)?;
                 }
                 Payload::BroadcastOk => {}
@@ -296,7 +302,12 @@ impl<'a> Node<IntializedNode<'a>> {
                         &mesg.src,
                         mesg.body.msg_id,
                         &Payload::ReadOk {
-                            messages: self.state.broadcast_ids.clone(),
+                            messages: self
+                                .state
+                                .broadcast_ids
+                                .iter()
+                                .cloned()
+                                .collect::<Vec<i32>>(),
                         },
                     )?;
                 }
