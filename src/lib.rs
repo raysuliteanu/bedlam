@@ -5,6 +5,8 @@ use std::io::{StdinLock, StdoutLock, Write};
 use crate::messages::{Body, Echo, Mesg, Payload};
 
 pub mod messages {
+    use std::collections::HashMap;
+
     use serde::{Deserialize, Serialize};
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -53,6 +55,12 @@ pub mod messages {
         EchoOk(Echo),
         Generate,
         GenerateOk { id: String },
+        Broadcast { message: i32 },
+        BroadcastOk,
+        Read,
+        ReadOk { messages: Vec<i32> },
+        Topology { topology: HashMap<String, Vec<i32>> },
+        TopologyOk,
     }
 
     #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -70,9 +78,10 @@ pub struct IntializedNode<'de> {
     pub node_id: String,
     // node_ids includes node_id
     pub node_ids: Vec<String>,
-    pub guid: usize,
+    pub msg_id: usize,
     input_stream: StreamDeserializer<'de, IoRead<StdinLock<'de>>, Mesg>,
     output: StdoutLock<'de>,
+    broadcast_ids: Vec<i32>,
 }
 
 pub struct Node<S> {
@@ -89,7 +98,6 @@ impl<'a> Node<UninitializedNode<'a>> {
     pub fn initialize(mut self) -> anyhow::Result<Node<IntializedNode<'a>>> {
         let mut input_stream =
             serde_json::Deserializer::from_reader(self.state.input).into_iter::<Mesg>();
-        let mut guid: usize = 0;
         let init = if let Ok(mesg) = input_stream.next().context("failed to read input stream")? {
             match mesg.body.payload {
                 Payload::Init(node) => {
@@ -97,35 +105,36 @@ impl<'a> Node<UninitializedNode<'a>> {
                         src: node.node_id.clone(),
                         dst: mesg.src,
                         body: Body {
-                            msg_id: Some(guid),
+                            msg_id: Some(0),
                             in_reply_to: mesg.body.msg_id,
                             payload: Payload::InitOk,
                         },
                     };
+
                     writeln!(
                         &mut self.state.output,
                         "{}",
                         serde_json::to_string(&init_ok).context("serialize init_ok response")?
                     )?;
-                    guid += 1;
+
                     node
                 }
                 _ => {
-                    eprintln!("{:?}", mesg);
-                    panic!("expected init message");
+                    panic!("expected init message, got {:?}", mesg);
                 }
             }
         } else {
-            todo!()
+            panic!("expected an init message")
         };
 
         Ok(Node {
             state: IntializedNode {
                 node_id: init.node_id,
                 node_ids: init.node_ids,
-                guid,
+                msg_id: 1,
                 input_stream,
                 output: self.state.output,
+                broadcast_ids: Vec::new(),
             },
         })
     }
@@ -137,13 +146,13 @@ impl<'a> Node<IntializedNode<'a>> {
             src: self.state.node_id.clone(),
             dst: src.src.clone(),
             body: Body {
-                msg_id: Some(self.state.guid),
+                msg_id: Some(self.state.msg_id),
                 in_reply_to: src.body.msg_id,
                 payload,
             },
         };
 
-        self.state.guid += 1;
+        self.state.msg_id += 1;
 
         writeln!(
             &mut self.state.output,
@@ -169,10 +178,28 @@ impl<'a> Node<IntializedNode<'a>> {
                 }
                 Payload::EchoOk(_) => {}
                 Payload::Generate => {
-                    let id = format!("{}-{}", self.state.node_id, self.state.guid);
+                    let id = format!("{}-{}", self.state.node_id, self.state.msg_id);
                     self.send_resp(&mesg, Payload::GenerateOk { id })?;
                 }
                 Payload::GenerateOk { .. } => {}
+                Payload::Broadcast { message } => {
+                    self.state.broadcast_ids.push(message);
+                    self.send_resp(&mesg, Payload::BroadcastOk)?;
+                }
+                Payload::BroadcastOk => {}
+                Payload::Read => {
+                    self.send_resp(
+                        &mesg,
+                        Payload::ReadOk {
+                            messages: self.state.broadcast_ids.clone(),
+                        },
+                    )?;
+                }
+                Payload::ReadOk { .. } => {}
+                Payload::Topology { .. } => {
+                    self.send_resp(&mesg, Payload::TopologyOk)?;
+                }
+                Payload::TopologyOk => {}
             }
         }
         Ok(())
