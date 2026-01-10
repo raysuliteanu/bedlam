@@ -110,33 +110,30 @@ impl<'a> Node<UninitializedNode<'a>> {
     pub fn initialize(mut self) -> anyhow::Result<Node<IntializedNode<'a>>> {
         let mut input_stream =
             serde_json::Deserializer::from_reader(self.state.input).into_iter::<Mesg>();
-        let init = if let Ok(mesg) = input_stream.next().context("failed to read input stream")? {
-            match mesg.body.payload {
-                Payload::Init(node) => {
-                    let init_ok = Mesg {
-                        src: node.node_id.clone(),
-                        dst: mesg.src,
-                        body: Body {
-                            msg_id: Some(0),
-                            in_reply_to: mesg.body.msg_id,
-                            payload: Payload::InitOk,
-                        },
-                    };
+        let mesg = input_stream.next().expect("expected an 'init' message")?;
+        let init = match mesg.body.payload {
+            Payload::Init(node) => {
+                let init_ok = Mesg {
+                    src: node.node_id.clone(),
+                    dst: mesg.src,
+                    body: Body {
+                        msg_id: Some(0),
+                        in_reply_to: mesg.body.msg_id,
+                        payload: Payload::InitOk,
+                    },
+                };
 
-                    writeln!(
-                        &mut self.state.output,
-                        "{}",
-                        serde_json::to_string(&init_ok).context("serialize init_ok response")?
-                    )?;
+                writeln!(
+                    &mut self.state.output,
+                    "{}",
+                    serde_json::to_string(&init_ok).context("serialize init_ok response")?
+                )?;
 
-                    node
-                }
-                _ => {
-                    panic!("expected init message, got {:?}", mesg);
-                }
+                node
             }
-        } else {
-            panic!("expected an init message")
+            _ => {
+                panic!("expected init message, got {:?}", mesg);
+            }
         };
 
         let mut cluster: HashSet<String> = HashSet::from_iter(init.node_ids);
